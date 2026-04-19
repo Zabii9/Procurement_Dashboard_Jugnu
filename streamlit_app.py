@@ -309,7 +309,8 @@ def fmt_num(n):
 tabs = st.tabs([
     "📊 Overview", "🏭 Supplier Analysis", "📦 Inventory Health",
     "🎯 Target Tracking", "🔬 SKU Deep Dive", "⚡ Alerts & Insights",
-    "📋 SKU Level Detail", "🔮 Zero SKU Demand Forecast", "💼 Working Capital"
+    "📋 SKU Level Detail", "🔮 Zero SKU Demand Forecast", "💼 Working Capital",
+    "🔠 ABC Analysis", "⚙️ EOQ", "🛡️ Safety Stock"
 ])
 
 
@@ -1680,6 +1681,595 @@ with tabs[8]:
     st.download_button("⬇️  Download Working Capital Analysis as CSV",
                        data=csv_wc, file_name="working_capital_analysis.csv",
                        mime="text/csv")
+
+# ════════════════════════════════════════════════════════════════════════════════
+# TAB 10 – ABC ANALYSIS
+# ════════════════════════════════════════════════════════════════════════════════
+with tabs[9]:
+    st.markdown('<div class="section-header">🔠 ABC Analysis — Inventory Value Classification</div>', unsafe_allow_html=True)
+
+    # ── ABC Classification ───────────────────────────────────────────────────
+    abc_df = df.groupby(["SKU Code","SKU Description","ManufacturerName","BrandName","SKU Category","BusinessUnitName"]).agg(
+        Annual_Value=("Total buying Amount","sum"),
+        LTDS=("LTDS_Amount","sum"),
+        MTD=("MTD","sum"),
+        Available_Units=("Available Total Units","sum"),
+        AWS_Units=("AWS in Units","sum"),
+        OOS=("IsOOS","max"),
+    ).reset_index()
+
+    # Use LTDS as proxy for annual demand value (better than purchase amt for classification)
+    abc_df["Value_Proxy"] = np.where(abc_df["LTDS"] > 0, abc_df["LTDS"], abc_df["Annual_Value"])
+    abc_df = abc_df[abc_df["Value_Proxy"] > 0].copy()
+    abc_df = abc_df.sort_values("Value_Proxy", ascending=False).reset_index(drop=True)
+    abc_df["Cumulative_Value"] = abc_df["Value_Proxy"].cumsum()
+    abc_df["Cumulative_Pct"]  = abc_df["Cumulative_Value"] / abc_df["Value_Proxy"].sum() * 100
+    abc_df["SKU_Pct"]         = (abc_df.index + 1) / len(abc_df) * 100
+
+    # Standard ABC thresholds
+    with st.expander("⚙️  ABC Thresholds (adjust to customise classification)", expanded=False):
+        th_col1, th_col2 = st.columns(2)
+        abc_a_thresh = th_col1.slider("Class A — Top Value Cumulative %", 50, 90, 80, 5, key="abc_a")
+        abc_b_thresh = th_col2.slider("Class B — Mid Value Cumulative %", abc_a_thresh+1, 99, 95, 1, key="abc_b")
+
+    def classify_abc(pct):
+        if pct <= abc_a_thresh:  return "A"
+        elif pct <= abc_b_thresh: return "B"
+        return "C"
+
+    abc_df["ABC_Class"] = abc_df["Cumulative_Pct"].apply(classify_abc)
+
+    # ── KPI Cards ────────────────────────────────────────────────────────────
+    a_skus = abc_df[abc_df["ABC_Class"]=="A"]
+    b_skus = abc_df[abc_df["ABC_Class"]=="B"]
+    c_skus = abc_df[abc_df["ABC_Class"]=="C"]
+
+    ak1,ak2,ak3,ak4,ak5,ak6 = st.columns(6)
+    mini_card(ak1, "Total SKUs Classified",    f"{len(abc_df):,}",          "#e2e8f0")
+    mini_card(ak2, "Class A SKUs",             f"{len(a_skus):,}",          "#4ade80")
+    mini_card(ak3, "Class B SKUs",             f"{len(b_skus):,}",          "#60a5fa")
+    mini_card(ak4, "Class C SKUs",             f"{len(c_skus):,}",          "#f59e0b")
+    mini_card(ak5, "Class A Value Share",      f"{a_skus['Value_Proxy'].sum()/abc_df['Value_Proxy'].sum()*100:.1f}%", "#4ade80")
+    mini_card(ak6, "Class A SKU Share",        f"{len(a_skus)/len(abc_df)*100:.1f}%", "#94a3b8")
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Charts Row 1 ─────────────────────────────────────────────────────────
+    ac1, ac2, ac3 = st.columns(3)
+
+    with ac1:
+        # Pareto Curve
+        fig_abc1 = make_subplots(specs=[[{"secondary_y": True}]])
+        color_map = {"A":"#4ade80","B":"#60a5fa","C":"#f59e0b"}
+        for cls in ["A","B","C"]:
+            sub = abc_df[abc_df["ABC_Class"]==cls]
+            fig_abc1.add_bar(x=sub.index, y=sub["Value_Proxy"], name=f"Class {cls}",
+                             marker_color=color_map[cls])
+        fig_abc1.add_scatter(x=abc_df.index, y=abc_df["Cumulative_Pct"],
+                             mode="lines", name="Cumulative %",
+                             line=dict(color="#f8fafc",width=2), secondary_y=True)
+        fig_abc1.add_hline(y=abc_a_thresh, line_dash="dash", line_color="#4ade80",
+                           secondary_y=True, annotation_text=f"A: {abc_a_thresh}%")
+        fig_abc1.add_hline(y=abc_b_thresh, line_dash="dash", line_color="#60a5fa",
+                           secondary_y=True, annotation_text=f"B: {abc_b_thresh}%")
+        fig_abc1.update_layout(barmode="stack", template="plotly_dark",
+                               paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                               height=320, title="Pareto Curve — ABC Classification",
+                               legend=dict(orientation="h",y=1.15,font_size=9),
+                               margin=dict(l=0,r=0,t=50,b=20))
+        fig_abc1.update_yaxes(title_text="Value (₨)", secondary_y=False)
+        fig_abc1.update_yaxes(title_text="Cumulative %", secondary_y=True)
+        st.plotly_chart(fig_abc1, use_container_width=True)
+
+    with ac2:
+        # Class breakdown donut
+        abc_summary = abc_df.groupby("ABC_Class").agg(
+            SKUs=("SKU Code","count"),
+            Value=("Value_Proxy","sum")
+        ).reset_index()
+        abc_summary["Pct"] = (abc_summary["Value"]/abc_summary["Value"].sum()*100).round(1)
+        fig_abc2 = px.pie(abc_summary, values="Value", names="ABC_Class", hole=0.55,
+                          color="ABC_Class", color_discrete_map=color_map,
+                          title="Value Share by ABC Class")
+        fig_abc2.update_traces(textinfo="label+percent", textfont_size=12)
+        fig_abc2.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
+                               height=320, showlegend=False,
+                               margin=dict(l=0,r=0,t=50,b=0))
+        st.plotly_chart(fig_abc2, use_container_width=True)
+
+    with ac3:
+        # Category breakdown stacked bar
+        cat_abc = abc_df.groupby(["SKU Category","ABC_Class"]).size().reset_index(name="Count")
+        fig_abc3 = px.bar(cat_abc, x="SKU Category", y="Count", color="ABC_Class",
+                          color_discrete_map=color_map, barmode="stack",
+                          title="ABC Class Distribution by Category")
+        fig_abc3.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
+                               plot_bgcolor="rgba(0,0,0,0)", height=320,
+                               xaxis=dict(tickangle=-40,tickfont_size=9),
+                               legend=dict(orientation="h",y=1.15,font_size=9),
+                               margin=dict(l=0,r=0,t=50,b=80))
+        st.plotly_chart(fig_abc3, use_container_width=True)
+
+    # ── Charts Row 2 ─────────────────────────────────────────────────────────
+    ac4, ac5 = st.columns([1.5,1])
+
+    with ac4:
+        # Manufacturer ABC scatter
+        manu_abc = abc_df.groupby(["ManufacturerName","ABC_Class"]).agg(
+            SKUs=("SKU Code","count"), Value=("Value_Proxy","sum")
+        ).reset_index()
+        manu_abc_pivot = manu_abc.pivot_table(index="ManufacturerName", columns="ABC_Class",
+                                              values="SKUs", fill_value=0).reset_index()
+        manu_abc_val   = abc_df.groupby("ManufacturerName")["Value_Proxy"].sum().reset_index()
+        manu_abc_pivot = manu_abc_pivot.merge(manu_abc_val, on="ManufacturerName")
+        manu_abc_pivot = manu_abc_pivot.sort_values("Value_Proxy", ascending=False).head(15)
+        fig_abc4 = go.Figure()
+        for cls in ["A","B","C"]:
+            if cls in manu_abc_pivot.columns:
+                fig_abc4.add_bar(x=manu_abc_pivot["ManufacturerName"], y=manu_abc_pivot[cls],
+                                 name=f"Class {cls}", marker_color=color_map[cls])
+        fig_abc4.update_layout(barmode="stack", template="plotly_dark",
+                               paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                               height=320, title="Top 15 Manufacturers — ABC SKU Mix",
+                               xaxis=dict(tickangle=-40,tickfont_size=9),
+                               legend=dict(orientation="h",y=1.15,font_size=9),
+                               margin=dict(l=0,r=0,t=50,b=100))
+        st.plotly_chart(fig_abc4, use_container_width=True)
+
+    with ac5:
+        # OOS rate by class
+        oos_by_class = abc_df.groupby("ABC_Class").agg(
+            Total=("SKU Code","count"), OOS=("OOS","sum")
+        ).reset_index()
+        oos_by_class["OOS_Rate"] = (oos_by_class["OOS"]/oos_by_class["Total"]*100).round(1)
+        fig_abc5 = px.bar(oos_by_class, x="ABC_Class", y="OOS_Rate",
+                          color="ABC_Class", color_discrete_map=color_map,
+                          text="OOS_Rate", title="OOS Rate by ABC Class (%)")
+        fig_abc5.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
+        fig_abc5.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
+                               plot_bgcolor="rgba(0,0,0,0)", height=320,
+                               showlegend=False, margin=dict(l=0,r=0,t=50,b=20))
+        st.plotly_chart(fig_abc5, use_container_width=True)
+
+    # ── ABC Detail Table ─────────────────────────────────────────────────────
+    st.markdown('<div class="section-header">ABC Classified SKU Table</div>', unsafe_allow_html=True)
+    f_abc_class = st.multiselect("Filter by Class", ["A","B","C"], default=["A","B","C"], key="abc_class_filter")
+    abc_show = abc_df[abc_df["ABC_Class"].isin(f_abc_class)].copy()
+    abc_show["Value_Proxy"] = abc_show["Value_Proxy"].apply(lambda x: f"₨{x:,.0f}")
+    abc_show["Cumulative_Pct"] = abc_show["Cumulative_Pct"].apply(lambda x: f"{x:.1f}%")
+    abc_show["SKU_Pct"]      = abc_show["SKU_Pct"].apply(lambda x: f"{x:.1f}%")
+    abc_show["OOS"]          = abc_show["OOS"].map({True:"🔴 OOS",False:"🟢 OK"})
+    abc_show = abc_show[["ABC_Class","SKU Description","ManufacturerName","BrandName",
+                          "SKU Category","BusinessUnitName","Value_Proxy","Cumulative_Pct","SKU_Pct","OOS"]]
+    abc_show.rename(columns={"ABC_Class":"Class","SKU Description":"Description",
+                              "ManufacturerName":"Manufacturer","BrandName":"Brand",
+                              "SKU Category":"Category","BusinessUnitName":"BU",
+                              "Value_Proxy":"Value (₨)","Cumulative_Pct":"Cumulative %",
+                              "SKU_Pct":"SKU %","OOS":"Status"}, inplace=True)
+
+    def style_abc(row):
+        c = {"A":"#052e16","B":"#0c1a2e","C":"#1c0a00"}.get(row["Class"],"")
+        return [f"background-color:{c}"] * len(row) if c else [""] * len(row)
+
+    st.dataframe(abc_show.style.apply(style_abc, axis=1), use_container_width=True, height=420)
+    csv_abc = abc_df.to_csv(index=False).encode()
+    st.download_button("⬇️  Download ABC Classification as CSV", data=csv_abc,
+                       file_name="abc_analysis.csv", mime="text/csv")
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# TAB 11 – EOQ (ECONOMIC ORDER QUANTITY)
+# ════════════════════════════════════════════════════════════════════════════════
+with tabs[10]:
+    st.markdown('<div class="section-header">⚙️ Economic Order Quantity (EOQ) Analysis</div>', unsafe_allow_html=True)
+
+    # ── Global EOQ parameters ────────────────────────────────────────────────
+    with st.expander("⚙️  EOQ Parameters (adjust assumptions)", expanded=True):
+        ep1, ep2, ep3 = st.columns(3)
+        holding_pct  = ep1.slider("Annual Holding Cost (% of unit cost)", 5, 40, 20, 1, key="eoq_h") / 100
+        order_cost   = ep2.number_input("Ordering Cost per Order (₨)", min_value=100, max_value=50000,
+                                        value=2500, step=100, key="eoq_o")
+        lead_days    = ep3.slider("Average Lead Time (days)", 1, 60, 7, 1, key="eoq_l")
+        working_days_eoq = ep1.number_input("Working Days per Year", 200, 365, 300, key="eoq_wd")
+
+    # ── Build EOQ dataframe ──────────────────────────────────────────────────
+    eoq_df = df.groupby(["SKU Code","SKU Description","ManufacturerName",
+                          "BrandName","SKU Category","BusinessUnitName"]).agg(
+        Annual_Demand_Units=("AWS in Units","sum"),   # AWS as annual demand proxy
+        Unit_Cost=("Unit_Cost","mean"),
+        Available_Units=("Available Total Units","sum"),
+        MTD=("MTD","sum"),
+        LTDS=("LTDS_Amount","sum"),
+    ).reset_index()
+
+    # Scale AWS weekly units → annual (AWS is weekly stock level; demand ≈ AWS/week × working weeks)
+    weeks_per_year  = working_days_eoq / 5
+    eoq_df["Annual_Demand_Units"] = eoq_df["Annual_Demand_Units"] * weeks_per_year
+
+    # Filter to SKUs with valid cost & demand
+    eoq_df = eoq_df[(eoq_df["Unit_Cost"] > 0) & (eoq_df["Annual_Demand_Units"] > 0)].copy()
+
+    # EOQ = sqrt(2 * D * S / H)
+    eoq_df["H"]          = eoq_df["Unit_Cost"] * holding_pct        # holding cost per unit per year
+    eoq_df["EOQ"]        = np.sqrt(2 * eoq_df["Annual_Demand_Units"] * order_cost / eoq_df["H"]).round(0)
+    eoq_df["Orders_Per_Year"] = (eoq_df["Annual_Demand_Units"] / eoq_df["EOQ"]).round(1)
+    eoq_df["Cycle_Days"] = np.where(eoq_df["Orders_Per_Year"] > 0,
+                                    working_days_eoq / eoq_df["Orders_Per_Year"], 0).round(1)
+    eoq_df["Total_Annual_Cost"] = (
+        (eoq_df["Annual_Demand_Units"] / eoq_df["EOQ"]) * order_cost +
+        (eoq_df["EOQ"] / 2) * eoq_df["H"]
+    ).round(2)
+    eoq_df["Current_Stock_Coverage_Days"] = np.where(
+        eoq_df["Annual_Demand_Units"] > 0,
+        eoq_df["Available_Units"] / (eoq_df["Annual_Demand_Units"] / working_days_eoq), 0
+    ).round(1)
+    eoq_df["Reorder_Point"] = (
+        (eoq_df["Annual_Demand_Units"] / working_days_eoq) * lead_days
+    ).round(0)
+    eoq_df["Needs_Reorder"] = eoq_df["Available_Units"] <= eoq_df["Reorder_Point"]
+
+    # ── KPI Cards ────────────────────────────────────────────────────────────
+    ek1,ek2,ek3,ek4,ek5 = st.columns(5)
+    reorder_needed = eoq_df["Needs_Reorder"].sum()
+    avg_eoq        = eoq_df["EOQ"].median()
+    avg_cycle      = eoq_df["Cycle_Days"].median()
+    total_opt_cost = eoq_df["Total_Annual_Cost"].sum()
+    avg_orders_yr  = eoq_df["Orders_Per_Year"].median()
+
+    mini_card(ek1, "SKUs Analysed",       f"{len(eoq_df):,}",               "#e2e8f0")
+    mini_card(ek2, "SKUs at Reorder Point",f"{int(reorder_needed):,}",      "#f87171")
+    mini_card(ek3, "Median EOQ (units)",  f"{avg_eoq:,.0f} pcs",           "#60a5fa")
+    mini_card(ek4, "Median Order Cycle",  f"{avg_cycle:.0f} days",          "#4ade80")
+    mini_card(ek5, "Total Opt. Cost/yr",  fmt_num(total_opt_cost),           "#a78bfa")
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Charts Row 1 ─────────────────────────────────────────────────────────
+    ec1, ec2, ec3 = st.columns(3)
+
+    with ec1:
+        # EOQ distribution histogram
+        fig_eoq1 = px.histogram(eoq_df[eoq_df["EOQ"] < eoq_df["EOQ"].quantile(0.95)],
+                                x="EOQ", nbins=40, color_discrete_sequence=["#6366f1"],
+                                title="EOQ Distribution (units)")
+        fig_eoq1.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
+                               plot_bgcolor="rgba(0,0,0,0)", height=300,
+                               margin=dict(l=0,r=0,t=50,b=30))
+        st.plotly_chart(fig_eoq1, use_container_width=True)
+
+    with ec2:
+        # Reorder status by category
+        reorder_cat = eoq_df.groupby("SKU Category").agg(
+            Total=("SKU Code","count"), Reorder=("Needs_Reorder","sum")
+        ).reset_index()
+        reorder_cat["OK"] = reorder_cat["Total"] - reorder_cat["Reorder"]
+        reorder_cat["Reorder_Rate"] = (reorder_cat["Reorder"]/reorder_cat["Total"]*100).round(1)
+        fig_eoq2 = go.Figure()
+        fig_eoq2.add_bar(x=reorder_cat["SKU Category"], y=reorder_cat["OK"],
+                         name="OK", marker_color="#4ade80")
+        fig_eoq2.add_bar(x=reorder_cat["SKU Category"], y=reorder_cat["Reorder"],
+                         name="At Reorder Point", marker_color="#ef4444")
+        fig_eoq2.update_layout(barmode="stack", template="plotly_dark",
+                               paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                               height=300, title="Reorder Status by Category",
+                               xaxis=dict(tickangle=-40,tickfont_size=9),
+                               legend=dict(orientation="h",y=1.15,font_size=9),
+                               margin=dict(l=0,r=0,t=50,b=90))
+        st.plotly_chart(fig_eoq2, use_container_width=True)
+
+    with ec3:
+        # EOQ vs current stock scatter
+        plot_eoq = eoq_df.sample(min(400, len(eoq_df)))
+        fig_eoq3 = px.scatter(plot_eoq, x="EOQ", y="Available_Units",
+                              color="Needs_Reorder",
+                              color_discrete_map={True:"#ef4444", False:"#4ade80"},
+                              hover_name="SKU Description",
+                              title="EOQ vs Current Available Stock")
+        fig_eoq3.add_shape(type="line", x0=0, y0=0,
+                           x1=plot_eoq["EOQ"].max(), y1=plot_eoq["EOQ"].max(),
+                           line=dict(dash="dash", color="white", width=1))
+        fig_eoq3.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
+                               plot_bgcolor="rgba(0,0,0,0)", height=300,
+                               legend_title_text="At Reorder?",
+                               margin=dict(l=0,r=0,t=50,b=20))
+        st.plotly_chart(fig_eoq3, use_container_width=True)
+
+    # ── Charts Row 2 ─────────────────────────────────────────────────────────
+    ec4, ec5 = st.columns(2)
+
+    with ec4:
+        # Order cycle by category box
+        fig_eoq4 = px.box(eoq_df[eoq_df["Cycle_Days"]<365], x="SKU Category", y="Cycle_Days",
+                          color="SKU Category", title="Order Cycle Days by Category")
+        fig_eoq4.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
+                               plot_bgcolor="rgba(0,0,0,0)", height=320,
+                               showlegend=False, xaxis=dict(tickangle=-40,tickfont_size=9),
+                               margin=dict(l=0,r=0,t=50,b=90))
+        st.plotly_chart(fig_eoq4, use_container_width=True)
+
+    with ec5:
+        # Top SKUs needing reorder
+        reorder_skus = eoq_df[eoq_df["Needs_Reorder"]].sort_values("LTDS", ascending=False).head(20)
+        fig_eoq5 = px.bar(reorder_skus, x="Annual_Demand_Units", y="SKU Description",
+                          orientation="h", color="Current_Stock_Coverage_Days",
+                          color_continuous_scale="RdYlGn", range_color=[0, lead_days*2],
+                          title=f"Top 20 SKUs at Reorder Point (color=coverage days)",
+                          labels={"Annual_Demand_Units":"Annual Demand (units)",
+                                  "Current_Stock_Coverage_Days":"Coverage Days"})
+        fig_eoq5.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
+                               plot_bgcolor="rgba(0,0,0,0)", height=320,
+                               yaxis=dict(tickfont_size=9),
+                               margin=dict(l=0,r=0,t=50,b=20), coloraxis_showscale=False)
+        st.plotly_chart(fig_eoq5, use_container_width=True)
+
+    # ── EOQ Detail Table ─────────────────────────────────────────────────────
+    st.markdown('<div class="section-header">EOQ SKU Detail Table</div>', unsafe_allow_html=True)
+    show_reorder_only = st.checkbox("Show only SKUs at Reorder Point", key="eoq_reorder_only")
+    eoq_show = eoq_df[eoq_df["Needs_Reorder"]].copy() if show_reorder_only else eoq_df.copy()
+    eoq_show = eoq_show.sort_values("LTDS", ascending=False)
+
+    eoq_disp = eoq_show[["SKU Description","ManufacturerName","SKU Category",
+                           "Annual_Demand_Units","Unit_Cost","EOQ","Reorder_Point",
+                           "Available_Units","Needs_Reorder","Orders_Per_Year",
+                           "Cycle_Days","Total_Annual_Cost","Current_Stock_Coverage_Days"]].copy()
+    eoq_disp["Unit_Cost"]    = eoq_disp["Unit_Cost"].apply(lambda x: f"₨{x:,.2f}")
+    eoq_disp["Total_Annual_Cost"] = eoq_disp["Total_Annual_Cost"].apply(lambda x: f"₨{x:,.0f}")
+    eoq_disp["Annual_Demand_Units"] = eoq_disp["Annual_Demand_Units"].apply(lambda x: f"{x:,.0f}")
+    eoq_disp["EOQ"] = eoq_disp["EOQ"].apply(lambda x: f"{x:,.0f}")
+    eoq_disp["Reorder_Point"] = eoq_disp["Reorder_Point"].apply(lambda x: f"{x:,.0f}")
+    eoq_disp["Needs_Reorder"] = eoq_disp["Needs_Reorder"].map({True:"🔴 YES",False:"🟢 NO"})
+    eoq_disp.rename(columns={
+        "SKU Description":"Description","ManufacturerName":"Manufacturer","SKU Category":"Category",
+        "Annual_Demand_Units":"Annual Demand","Unit_Cost":"Unit Cost","EOQ":"EOQ (units)",
+        "Reorder_Point":"Reorder Point","Available_Units":"Available","Needs_Reorder":"Need Reorder",
+        "Orders_Per_Year":"Orders/Year","Cycle_Days":"Cycle Days",
+        "Total_Annual_Cost":"Opt. Annual Cost","Current_Stock_Coverage_Days":"Coverage Days"
+    }, inplace=True)
+
+    def style_eoq(row):
+        if row["Need Reorder"] == "🔴 YES":
+            return ["background-color:#2d1515;color:#fca5a5"] * len(row)
+        return [""] * len(row)
+
+    st.dataframe(eoq_disp.style.apply(style_eoq, axis=1), use_container_width=True, height=420)
+    csv_eoq = eoq_show.to_csv(index=False).encode()
+    st.download_button("⬇️  Download EOQ Analysis as CSV", data=csv_eoq,
+                       file_name="eoq_analysis.csv", mime="text/csv")
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# TAB 12 – SAFETY STOCK
+# ════════════════════════════════════════════════════════════════════════════════
+with tabs[11]:
+    st.markdown('<div class="section-header">🛡️ Safety Stock Analysis — Buffer Inventory Planning</div>', unsafe_allow_html=True)
+
+    # ── Safety Stock Parameters ──────────────────────────────────────────────
+    with st.expander("⚙️  Safety Stock Parameters", expanded=True):
+        sp1, sp2, sp3, sp4 = st.columns(4)
+        service_level_z = sp1.selectbox("Service Level (Z-Score)",
+                                        ["90% (Z=1.28)","95% (Z=1.65)","97% (Z=1.88)","99% (Z=2.33)"],
+                                        index=1, key="ss_z")
+        z_map = {"90% (Z=1.28)":1.28,"95% (Z=1.65)":1.65,"97% (Z=1.88)":1.88,"99% (Z=2.33)":2.33}
+        Z = z_map[service_level_z]
+        lead_time_ss  = sp2.slider("Lead Time (days)", 1, 60, 7, key="ss_lt")
+        demand_var_pct = sp3.slider("Demand Variability (% std dev of daily demand)", 5, 80, 25, 5, key="ss_dv") / 100
+        lead_var_pct  = sp4.slider("Lead Time Variability (% std dev)", 0, 50, 15, 5, key="ss_lv") / 100
+        wdays_ss = sp1.number_input("Working Days per Year", 200, 365, 300, key="ss_wd")
+
+    # ── Safety Stock calculation ─────────────────────────────────────────────
+    ss_df = df.groupby(["SKU Code","SKU Description","ManufacturerName",
+                         "BrandName","SKU Category","BusinessUnitName"]).agg(
+        AWS_Units=("AWS in Units","sum"),
+        Available_Units=("Available Total Units","sum"),
+        MSL_Units=("MSL in Units","sum"),
+        Unit_Cost=("Unit_Cost","mean"),
+        OOS=("IsOOS","max"),
+        Gap_Units=("Gap_Units","sum"),
+        LTDS=("LTDS_Amount","sum"),
+    ).reset_index()
+
+    ss_df = ss_df[ss_df["AWS_Units"] > 0].copy()
+
+    # Daily demand = AWS weekly units / 5 working days
+    ss_df["Daily_Demand"]      = ss_df["AWS_Units"] / 5
+    ss_df["Demand_Std"]        = ss_df["Daily_Demand"] * demand_var_pct
+    ss_df["Lead_Time_Std"]     = lead_time_ss * lead_var_pct
+
+    # Safety Stock formula: SS = Z * sqrt(LT * σd² + d² * σLT²)
+    ss_df["Safety_Stock"] = (
+        Z * np.sqrt(
+            lead_time_ss * ss_df["Demand_Std"]**2 +
+            ss_df["Daily_Demand"]**2 * ss_df["Lead_Time_Std"]**2
+        )
+    ).round(0)
+
+    ss_df["Reorder_Point_SS"] = (ss_df["Daily_Demand"] * lead_time_ss + ss_df["Safety_Stock"]).round(0)
+    ss_df["Max_Stock"]        = (ss_df["Reorder_Point_SS"] + ss_df["AWS_Units"]).round(0)
+    ss_df["Current_vs_SS"]   = ss_df["Available_Units"] - ss_df["Safety_Stock"]
+    ss_df["SS_Status"]       = pd.cut(
+        ss_df["Current_vs_SS"],
+        bins=[-np.inf, 0, ss_df["Safety_Stock"].median(), np.inf],
+        labels=["Below SS","Near SS","Above SS"]
+    )
+    ss_df["SS_Value"]        = (ss_df["Safety_Stock"] * ss_df["Unit_Cost"]).round(2)
+    ss_df["SS_Coverage_Days"] = np.where(
+        ss_df["Daily_Demand"] > 0,
+        ss_df["Safety_Stock"] / ss_df["Daily_Demand"], 0
+    ).round(1)
+
+    # ── KPI Cards ────────────────────────────────────────────────────────────
+    sk1,sk2,sk3,sk4,sk5,sk6 = st.columns(6)
+    below_ss  = (ss_df["SS_Status"]=="Below SS").sum()
+    total_ss_val = ss_df["SS_Value"].sum()
+    avg_ss_units = ss_df["Safety_Stock"].median()
+    avg_ss_days  = ss_df["SS_Coverage_Days"].median()
+    pct_ok       = (ss_df["Current_vs_SS"] >= 0).mean() * 100
+
+    mini_card(sk1, "SKUs Analysed",        f"{len(ss_df):,}",              "#e2e8f0")
+    mini_card(sk2, "Below Safety Stock",   f"{int(below_ss):,}",           "#f87171")
+    mini_card(sk3, "Total SS Value (₨)",   fmt_num(total_ss_val),           "#a78bfa")
+    mini_card(sk4, "Median SS (units)",    f"{avg_ss_units:,.0f} pcs",     "#60a5fa")
+    mini_card(sk5, "Median SS Coverage",   f"{avg_ss_days:.1f} days",      "#4ade80")
+    mini_card(sk6, "SKUs Above SS (%)",    f"{pct_ok:.1f}%",               "#4ade80" if pct_ok>=70 else "#f87171")
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Charts Row 1 ─────────────────────────────────────────────────────────
+    sc1, sc2, sc3 = st.columns(3)
+
+    with sc1:
+        # Safety stock status donut
+        ss_status = ss_df["SS_Status"].value_counts().reset_index()
+        ss_status.columns = ["Status","Count"]
+        ss_colors_map = {"Below SS":"#ef4444","Near SS":"#f59e0b","Above SS":"#4ade80"}
+        fig_ss1 = px.pie(ss_status, values="Count", names="Status", hole=0.55,
+                         color="Status", color_discrete_map=ss_colors_map,
+                         title="SKUs vs Safety Stock Level")
+        fig_ss1.update_traces(textinfo="label+percent", textfont_size=11)
+        fig_ss1.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
+                              height=320, showlegend=False, margin=dict(l=0,r=0,t=50,b=0))
+        st.plotly_chart(fig_ss1, use_container_width=True)
+
+    with sc2:
+        # Safety stock by category bar
+        ss_cat = ss_df.groupby("SKU Category").agg(
+            Avg_SS=("Safety_Stock","mean"),
+            Avg_Available=("Available_Units","mean"),
+            Below_SS=("SS_Status", lambda x: (x=="Below SS").sum())
+        ).reset_index().sort_values("Avg_SS", ascending=False).head(15)
+        fig_ss2 = go.Figure()
+        fig_ss2.add_bar(x=ss_cat["SKU Category"], y=ss_cat["Avg_SS"],
+                        name="Avg Safety Stock", marker_color="#a78bfa")
+        fig_ss2.add_bar(x=ss_cat["SKU Category"], y=ss_cat["Avg_Available"],
+                        name="Avg Available", marker_color="#22d3ee")
+        fig_ss2.update_layout(barmode="group", template="plotly_dark",
+                              paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                              height=320, title="Safety Stock vs Available Units by Category",
+                              xaxis=dict(tickangle=-40,tickfont_size=9),
+                              legend=dict(orientation="h",y=1.15,font_size=9),
+                              margin=dict(l=0,r=0,t=50,b=90))
+        st.plotly_chart(fig_ss2, use_container_width=True)
+
+    with sc3:
+        # SS Coverage Days distribution
+        fig_ss3 = px.histogram(
+            ss_df[ss_df["SS_Coverage_Days"] < ss_df["SS_Coverage_Days"].quantile(0.95)],
+            x="SS_Coverage_Days", nbins=35, color_discrete_sequence=["#a78bfa"],
+            title="Safety Stock Coverage Days Distribution"
+        )
+        fig_ss3.add_vline(x=lead_time_ss, line_dash="dash", line_color="#ef4444",
+                          annotation_text=f"Lead Time ({lead_time_ss}d)")
+        fig_ss3.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
+                              plot_bgcolor="rgba(0,0,0,0)", height=320,
+                              margin=dict(l=0,r=0,t=50,b=30))
+        st.plotly_chart(fig_ss3, use_container_width=True)
+
+    # ── Charts Row 2 ─────────────────────────────────────────────────────────
+    sc4, sc5 = st.columns(2)
+
+    with sc4:
+        # Reorder point vs current stock scatter
+        plot_ss = ss_df.sample(min(500, len(ss_df)))
+        fig_ss4 = px.scatter(
+            plot_ss, x="Reorder_Point_SS", y="Available_Units",
+            color="SS_Status", color_discrete_map=ss_colors_map,
+            hover_name="SKU Description",
+            hover_data={"ManufacturerName":True,"Safety_Stock":":.0f","Daily_Demand":":.1f"},
+            title="Reorder Point vs Current Available Stock",
+            labels={"Reorder_Point_SS":"Reorder Point (units)","Available_Units":"Available (units)"}
+        )
+        # Diagonal line = reorder point == available
+        max_val = max(plot_ss["Reorder_Point_SS"].max(), plot_ss["Available_Units"].max())
+        fig_ss4.add_shape(type="line", x0=0, y0=0, x1=max_val, y1=max_val,
+                          line=dict(dash="dash",color="white",width=1))
+        fig_ss4.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
+                              plot_bgcolor="rgba(0,0,0,0)", height=360,
+                              margin=dict(l=0,r=0,t=50,b=20))
+        st.plotly_chart(fig_ss4, use_container_width=True)
+
+    with sc5:
+        # Top SKUs below safety stock
+        below_ss_df = ss_df[ss_df["SS_Status"]=="Below SS"].sort_values("Current_vs_SS").head(20)
+        fig_ss5 = px.bar(
+            below_ss_df, x="Current_vs_SS", y="SKU Description",
+            orientation="h",
+            color="Current_vs_SS", color_continuous_scale="Reds_r",
+            title="Top 20 SKUs Below Safety Stock (units short)",
+            labels={"Current_vs_SS":"Units Below Safety Stock"}
+        )
+        fig_ss5.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
+                              plot_bgcolor="rgba(0,0,0,0)", height=360,
+                              yaxis=dict(tickfont_size=9), coloraxis_showscale=False,
+                              margin=dict(l=0,r=0,t=50,b=20))
+        st.plotly_chart(fig_ss5, use_container_width=True)
+
+    # ── Manufacturer Safety Stock summary ────────────────────────────────────
+    st.markdown('<div class="section-header">Safety Stock by Manufacturer</div>', unsafe_allow_html=True)
+    ss_manu = ss_df.groupby("ManufacturerName").agg(
+        SKUs=("SKU Code","count"),
+        Total_SS=("Safety_Stock","sum"),
+        Total_SS_Value=("SS_Value","sum"),
+        Below_SS=("SS_Status", lambda x: (x=="Below SS").sum()),
+        Total_Available=("Available_Units","sum"),
+        Avg_Coverage=("SS_Coverage_Days","mean"),
+    ).reset_index().sort_values("Total_SS_Value", ascending=False).head(20)
+
+    ss_manu["Below_SS_Pct"] = (ss_manu["Below_SS"]/ss_manu["SKUs"]*100).round(1)
+    ss_manu["Total_SS_Value_fmt"] = ss_manu["Total_SS_Value"].apply(lambda x: f"₨{x:,.0f}")
+    ss_manu_disp = ss_manu[["ManufacturerName","SKUs","Total_SS","Total_SS_Value_fmt",
+                              "Below_SS","Below_SS_Pct","Total_Available","Avg_Coverage"]].copy()
+    ss_manu_disp.rename(columns={
+        "ManufacturerName":"Manufacturer","Total_SS":"Total Safety Stock (units)",
+        "Total_SS_Value_fmt":"SS Value (₨)","Below_SS":"Below SS",
+        "Below_SS_Pct":"Below SS %","Total_Available":"Available Units",
+        "Avg_Coverage":"Avg Coverage (days)"
+    }, inplace=True)
+    ss_manu_disp["Total Safety Stock (units)"] = ss_manu_disp["Total Safety Stock (units)"].apply(lambda x: f"{x:,.0f}")
+    ss_manu_disp["Available Units"] = ss_manu_disp["Available Units"].apply(lambda x: f"{x:,.0f}")
+    ss_manu_disp["Below SS %"]       = ss_manu_disp["Below SS %"].apply(lambda x: f"{x:.1f}%")
+    ss_manu_disp["Avg Coverage (days)"] = ss_manu_disp["Avg Coverage (days)"].apply(lambda x: f"{x:.1f}")
+
+    def style_ss_manu(row):
+        pct_val = float(str(row["Below SS %"]).replace("%",""))
+        if pct_val >= 50:
+            return ["background-color:#2d1515;color:#fca5a5"] * len(row)
+        elif pct_val >= 25:
+            return ["background-color:#2d1a00;color:#fcd34d"] * len(row)
+        return [""] * len(row)
+
+    st.dataframe(ss_manu_disp.style.apply(style_ss_manu, axis=1), use_container_width=True, height=400)
+
+    # ── Full SKU Detail ───────────────────────────────────────────────────────
+    st.markdown('<div class="section-header">Safety Stock SKU Detail Table</div>', unsafe_allow_html=True)
+    ss_show = ss_df.copy().sort_values("Current_vs_SS")
+    ss_show_disp = ss_show[["SKU Description","ManufacturerName","SKU Category",
+                             "Daily_Demand","Safety_Stock","Reorder_Point_SS",
+                             "Available_Units","Current_vs_SS","SS_Status",
+                             "SS_Coverage_Days","SS_Value","OOS"]].copy()
+    ss_show_disp["Safety_Stock"]    = ss_show_disp["Safety_Stock"].apply(lambda x: f"{x:,.0f}")
+    ss_show_disp["Reorder_Point_SS"]= ss_show_disp["Reorder_Point_SS"].apply(lambda x: f"{x:,.0f}")
+    ss_show_disp["Available_Units"] = ss_show_disp["Available_Units"].apply(lambda x: f"{x:,.0f}")
+    ss_show_disp["Current_vs_SS"]   = ss_show_disp["Current_vs_SS"].apply(lambda x: f"{x:,.0f}")
+    ss_show_disp["Daily_Demand"]    = ss_show_disp["Daily_Demand"].apply(lambda x: f"{x:.1f}")
+    ss_show_disp["SS_Coverage_Days"]= ss_show_disp["SS_Coverage_Days"].apply(lambda x: f"{x:.1f}")
+    ss_show_disp["SS_Value"]        = ss_show_disp["SS_Value"].apply(lambda x: f"₨{x:,.0f}")
+    ss_show_disp["OOS"]             = ss_show_disp["OOS"].map({True:"🔴 OOS",False:"🟢 OK"})
+    ss_show_disp.rename(columns={
+        "SKU Description":"Description","ManufacturerName":"Manufacturer","SKU Category":"Category",
+        "Daily_Demand":"Daily Demand","Safety_Stock":"Safety Stock",
+        "Reorder_Point_SS":"Reorder Point","Available_Units":"Available",
+        "Current_vs_SS":"Vs Safety Stock","SS_Status":"SS Status",
+        "SS_Coverage_Days":"SS Coverage (days)","SS_Value":"SS Value (₨)","OOS":"OOS Status"
+    }, inplace=True)
+
+    def style_ss_sku(row):
+        if row["SS Status"] == "Below SS":
+            return ["background-color:#2d1515;color:#fca5a5"] * len(row)
+        if row["SS Status"] == "Near SS":
+            return ["background-color:#2d1a00;color:#fcd34d"] * len(row)
+        return [""] * len(row)
+
+    st.dataframe(ss_show_disp.style.apply(style_ss_sku, axis=1), use_container_width=True, height=440)
+    csv_ss = ss_show.to_csv(index=False).encode()
+    st.download_button("⬇️  Download Safety Stock Analysis as CSV", data=csv_ss,
+                       file_name="safety_stock_analysis.csv", mime="text/csv")
 
 # Footer
 st.markdown("""
