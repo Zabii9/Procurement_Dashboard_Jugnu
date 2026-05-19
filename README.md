@@ -21,6 +21,10 @@ For detailed instructions on how to use each tab and understand the metrics, ple
    ```bash
    streamlit run streamlit_app.py
    ```
+   https://procurment-jugnu.streamlit.app/
+
+   https://github.com/Zabii9/Procurement_Dashboard_Jugnu/blob/main/ScreenShot/Screenshot%202026-04-13%20210256.png
+   
 
 ---
 *Developed for advanced procurement intelligence.*
